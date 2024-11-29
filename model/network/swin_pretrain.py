@@ -113,6 +113,7 @@ class WindowAttention(nn.Module):
             x: input features with shape of (num_windows*B, N, C)
             mask: (0/-inf) mask with shape of (num_windows, Wh*Ww, Wh*Ww) or None
         """
+        # Same as original implementation
         B_, N, C = x.shape
         qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2] 
@@ -197,6 +198,7 @@ class SwinTransformerBlock(nn.Module):
         x = x.view(B, H, W, C)
 
         # pad feature maps to multiples of window size
+        # padding only to the right and bottom
         pad_l = pad_t = 0
         pad_r = (self.window_size - W % self.window_size) % self.window_size
         pad_b = (self.window_size - H % self.window_size) % self.window_size
@@ -353,8 +355,12 @@ class BasicLayer(nn.Module):
                 cnt += 1
 
         mask_windows = window_partition(img_mask, self.window_size)  # nW, window_size, window_size, 1
+        # -> [nW, ws, ws, 1]
         mask_windows = mask_windows.view(-1, self.window_size * self.window_size)
+        # -> [nW, ws*ws]
         attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
+        # [nW, 1, ws*ws] - [nW, ws*ws, 1] -> [nW, ws*ws, ws*ws]
+        # Convert all nonzero values to -100.0, and all zero values to 0.0
         attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0)).to(x)
 
         for blk in self.blocks:
@@ -544,6 +550,7 @@ class SWIN(nn.Module):
         
         if masks is not None:
             masks = masks.view(-1,self.mask_dim,self.mask_dim).repeat_interleave(self.patch_size, -1).repeat_interleave(self.patch_size, -2).flatten(1)
+            # Set values of masked tokens to 0
             x = torch.where(masks.unsqueeze(-1), self.mask_token.unsqueeze(0), x)    
             
         x  = x + absolute_pos_embed
@@ -561,6 +568,7 @@ class SWIN(nn.Module):
                 norm_layer = getattr(self, f'norm{i}')
                 x_out = norm_layer(x_out)
                 if hasattr(self,"fpns"):
+                    # num_features = [96, 192, 384, 768]
                     out = x_out.view(-1, H, W, self.num_features[i]).permute(0, 3, 1, 2).contiguous()
                     outs.append(self.fpns[i](out))
                 else:

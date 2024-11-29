@@ -22,9 +22,11 @@ class AttentionPool(nn.Module):
     def forward(self, x, repeats=1, mask=None):
 
         B, N, C = x.shape
+        # the queries are the cls tokens
         q = self.q(x[:,:repeats]).reshape(B, repeats, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
         q = q * self.scale
         
+        # the keys and values is everything
         k = self.k(x).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
         v = self.v(x).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
         
