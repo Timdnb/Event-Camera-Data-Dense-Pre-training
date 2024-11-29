@@ -56,6 +56,7 @@ def create_dataloader(dataset,
                       ):
     if ddp_sampler:
         drop_last = True
+        # drop last incomplete batch if the dataset size is not divisible by the batch size
         sampler = torch.utils.data.DistributedSampler(
             dataset, shuffle=True
         )
@@ -65,6 +66,7 @@ def create_dataloader(dataset,
             dataset
         )
     
+    # pin_memory should be True when dataset is loaded on CPU and then transferred to GPU
     Loader = DataLoader(dataset, 
         batch_size=dataset_opt["batch_size"], num_workers=dataset_opt["num_workers"], drop_last=drop_last, pin_memory=dataset_opt["pin_memory"], persistent_workers = dataset_opt["persistent_workers"], sampler = sampler)
     if not disable_print:
