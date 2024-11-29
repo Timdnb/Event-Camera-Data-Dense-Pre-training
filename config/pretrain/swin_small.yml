@@ -6,7 +6,7 @@ datasets:
     pin_memory: true
     file: generate_data/file_path.txt
     type: TartanairPretrainDataset
-    event_bins: 6
+    event_bins: 6 # can't change this without changing in_chans
     no_event_polarity: true
     num_workers: 7
     batch_size: 2  
