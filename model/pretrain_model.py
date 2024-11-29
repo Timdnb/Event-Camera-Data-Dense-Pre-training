@@ -26,6 +26,7 @@ class Transform(nn.Module):
         
         self.input = korniatfm.RandomCrop((input_size,input_size))
         
+        # align_corners=True is important for the grid_sample function
         teacher1 = [korniatfm.RandomResizedCrop((global_crops_size, global_crops_size), scale=global_crops_scale, same_on_batch=same_on_batch,cropping_mode="slice",align_corners=True)] 
         teacher1 += [korniatfm.RandomHorizontalFlip(p=0.5,same_on_batch=same_on_batch)]
         
@@ -44,6 +45,8 @@ class Transform(nn.Module):
         self.input_size = input_size
         grid_h, grid_w = np.meshgrid(range(input_size),range(input_size), indexing='ij')
         grid = torch.from_numpy(np.stack([grid_w, grid_h])).float().unsqueeze(0)
+        # register_buffers makes sure grid is stored in the state_dict, but not updated by optimizers
+        # +1 ensures that indexing starts from 1, e.g. top left is (1, 1)
         self.register_buffer("grid",grid + 1)
         self.downsample = downsample
         
@@ -54,21 +57,32 @@ class Transform(nn.Module):
         
         assert self.input_size == img.size(2) and self.input_size == img.size(3), f"{img.size()}"
         
+        # b = batch
         b = img.size(0)
-        teacher = img.repeat(2,1,1,1)
+        # the 2 below defines the number of global crops
+        teacher = img.repeat(2,1,1,1) 
+        # -> [B*n_global_crops, ebins, 224, 244]
         t_grid = self.grid.expand(b * 2,-1,-1,-1)
+        # -> [B*n_global_crops, 2, 224, 224], the 2 is for the grid_w and grid_h
         
         for f in self.teacher1:
             teacher = f(teacher)
+            # use f._params to ensurer that the same augmentation is applied to the grid
             t_grid = f(t_grid,params=f._params)
-          
+
+        # undo index shift  
         t_grid = t_grid - 1
+        # normalize to [-1, 1]
         t_grid = 2.0 * t_grid/ max(self.input_size - 1, 1) - 1.0
+        # interpolate to downsample size
         t_grid = torch.nn.functional.interpolate(t_grid, self.global_crops_size//self.downsample,mode="bilinear", align_corners=True) #torch.nn.functional.adaptive_avg_pool2d(t1_grid, self.global_crops_size//32)
+        # permute to match the format expected by the model
+        # (B, C, H, W) -> (B, H, W, C)
         t_grid = t_grid.permute(0, 2, 3, 1)
         
         
         student = img.repeat(8,1,1,1)
+        # the 8 below defines the number of local crops
         s_grid = self.grid.expand(b * 8,-1,-1,-1)
         
         student, s_grid = self.forward_imp(student, s_grid)
@@ -104,12 +118,17 @@ def batch_cosine_KMeans(X,num_clusters=6,max_iter=10):
     noise = torch.rand(N, L, device=X.device)
     ids_shuffle = torch.argsort(noise, dim=1)
     ids_keep = ids_shuffle[:, :num_clusters]
+    # ids_keep is num_clusters (=8 by default) random patch indices for each image in the batch
     centroids = torch.gather(X, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
+    # the centroids are the embeddings of the num_clusters (N_c) random patches for each image in the batch, [B, N_c, 768]
     
     for _ in range(max_iter):
         centroids = torch.nn.functional.normalize(centroids, dim=2)
+        # calculate for each path what its distance is to each centroid, [B, N_p, N_c], N_p = number of patches (196 by default)
         dis = 1 - torch.einsum('bij,bkj->bik', X, centroids)
         assignments = torch.argmin(dis, dim=2)
+        # scatter_mean averages the embeddings of the patches that are assigned to the same cluster
+        # this is the new centroid
         centroids = scatter_mean(X, assignments,dim=1)
     return assignments, centroids
 
@@ -137,6 +156,7 @@ class MaskingGenerator:
         max_aspect = max_aspect or 1 / min_aspect
         self.log_aspect_ratio = (math.log(min_aspect), math.log(max_aspect))
 
+    # a __repr__ function is used to print the object in a human readable format
     def __repr__(self):
         repr_str = "Generator(%d, %d -> [%d ~ %d], max = %d, %.3f ~ %.3f)" % (
             self.height,
@@ -156,6 +176,7 @@ class MaskingGenerator:
         delta = 0
         for _ in range(10):
             target_area = random.uniform(self.min_num_patches, max_mask_patches)
+            # no clue why the log is undone here
             aspect_ratio = math.exp(random.uniform(*self.log_aspect_ratio))
             h = int(round(math.sqrt(target_area * aspect_ratio)))
             w = int(round(math.sqrt(target_area / aspect_ratio)))
@@ -201,8 +222,13 @@ class BaseModel(nn.Module):
         teacher_model_dict = dict()
 
         t_kwargs = deepcopy(kwargs)
+        # teacher model does not have drop path
+        # drop path is a regularization technique that randomly drops connections in the network (I think)
         t_kwargs["drop_path_rate"] = 0.0
         student_backbone, teacher_backbone = SWIN(*args,**kwargs), SWIN(*args,**t_kwargs)
+        # print(f"Number of parameters in student backbone: {sum(p.numel() for p in student_backbone.parameters())}") # -> 30400794
+        # print(f"Number of parameters in teacher backbone: {sum(p.numel() for p in teacher_backbone.parameters())}") # -> 30400794
+        # not sure why * 2**3
         embed_dim = kwargs['embed_dim']  * 2**3
 
             
@@ -233,6 +259,7 @@ class BaseModel(nn.Module):
             nlayers=cfg.dino.head_nlayers,
             use_attpool = True,
         )
+        # use_attpool = True, here means that dino_head.att can be called, but by default it won't (need to pass pool=True)
         self.dino_loss = DINOLoss(self.dino_out_dim)
 
         student_model_dict["dino_head"] = dino_head()
@@ -285,8 +312,11 @@ class BaseModel(nn.Module):
             s_grid = samples["s_grid"]
             t_grid = samples["t_grid"]
             device = collated_global_crops.device
-        
+
+            # B is 'new' batch size, however not the original batch size, but batch size * num_global_crops
             B = len(collated_global_crops)
+            # N is not the same as number of patches (that is 12x12, this is 8x8), not sure what it is but probably arbitrary
+            # value to limit the number of patches being masked
             N = self.n_tokens**2  
             n_samples_masked = int(B * mask_probability)
             probs = torch.linspace(*mask_ratio_tuple, n_samples_masked + 1)
@@ -295,16 +325,25 @@ class BaseModel(nn.Module):
             for i in range(0, n_samples_masked):
                 prob_min = probs[i]
                 prob_max = probs[i + 1]
+                # single mask is a 12x12 boolean tensor
                 masks_list.append(torch.BoolTensor(mask_generator(int(N * random.uniform(prob_min, prob_max)))))
                 upperbound += int(N * prob_max)
             for i in range(n_samples_masked, B):
                 masks_list.append(torch.BoolTensor(mask_generator(0)))
-        
+
+            # masks_list is B*num_global_crops times [12x12]
             random.shuffle(masks_list)
-        
+
+            # collated_masks is [B*num_global_crops times, 144]
             collated_masks = torch.stack(masks_list).flatten(1).to(device)
+            # only keep the indices of the masked patches
             mask_indices_list = collated_masks.flatten().nonzero().flatten()
-        
+
+            # masks_weight is used to balance the loss when the number of masked patches is different
+            # this ensures that an image with many masked patches does not contribute more to the loss
+            # is this desired behavior?
+            # calculation comes down to: 1 / number of masked patches for the specific mask, then this weight is assigned 
+            # to each patch of that mask
             masks_weight = (1 / collated_masks.sum(-1).clamp(min=1.0)).unsqueeze(-1).expand_as(collated_masks)[collated_masks]
         
             return {
@@ -330,6 +369,8 @@ class PretrainModel(BaseModel):
             input_size=(N, N),
             max_num_patches=0.5 * N * N,
         )
+        # initialize the parent class
+        # i.e. backbone and 3 heads for both the teacher and student networrk
         super().__init__(mask_dim=mask_dim,*args,**kwargs)
         self.num_clusters = num_clusters
         self.aug = Transform(kwargs["cfg"]["crops"], aug_downsample)
@@ -376,69 +417,136 @@ class PretrainModel(BaseModel):
         def get_teacher_output():
             global t_assign_map, t_mask, s_assign_map, s_mask, teacher_patchtokens 
             
+            # teacher forward pass on input images; shape is [B, ebins, 224, 224]
             teacher_cls_tokens = self.teacher.backbone(imgs, is_training=True)[KEY]
+            # teacher_cls_tokens has shape [B, N_p, 768], N_p is number of patches (=14*14=196), each patch is 16x16 pixels
+            # 768 is the embedding dimension
+            # then for global crops (192x192 pixels), we get 12x12 patches
             wt = int(teacher_cls_tokens.size(1)**0.5)
             
+            # assign has shape [B, 196]
             assign, _ = batch_cosine_KMeans(teacher_cls_tokens, num_clusters=self.num_clusters)
+            # for future reference: if we want to use a variable number of clusters, it can be changed (per batch) on the fly
+            
+            show_assignments = False
+            if show_assignments:
+                # from this vizualization:
+                # patches are somewhat random and not apart from 0-2 clusters per image, the others are bad
+                # maybe improve this by only keeping the clusterr which cover
+                # 1. many events
+                # 2. minimum consecutive area (so not randomly scattered patches)
+                import rerun as rr
+                rr.init("assignments")
+                rr.connect_tcp('100.120.120.119:9876')
+                
+                ebin = 3
+                im_c = imgs[0][ebin].clone().detach().cpu().numpy()
+                assign_c = assign[0].clone().detach().cpu().numpy()
+
+                # create the colored image
+                colors = [(0,0,0), (255,0,0), (0,255,0), (0,0,255), (255,255,0), (0,255,255), (255,0,255), (255,255,255)]
+                im_color = np.zeros((224,224,3))
+                for i in range(14):
+                    for j in range(14):
+                        cluster = int(assign_c[i*14+j])
+                        # cluster = int(assign_c[i+j*14])
+                        im_color[i*16:i*16+16,j*16:j*16+16] = colors[cluster]
+
+                # overlay the color pattern with the original image (which is grayscale)
+                im_color = im_color/255
+                overlay = 0.5*im_color + 0.5*im_c[:,:,None]
+                overlay *= 255 
+
+                rr.log(f"ebin{ebin}", rr.Image(overlay))
+                input("Press Enter to continue...")
+
+            # convert cluster assignments to boolean mask per cluster, i.e. shape [B, N_c, 196]
             attmask = tomask(torch.zeros((b//2,self.num_clusters, wt**2),  device=teacher_cls_tokens.device),assign)
+            # pass though cluster attention head, output shape is [B, N_c, 768]
             teacher_cls_tokens = self.teacher.cluster_head.att(teacher_cls_tokens,self.num_clusters,mask=attmask)
             
+            # repeat assignment for number of global crops [B, 196] -> [B*num_global_crops, 196]
             t_assign = assign.repeat(n_global_crops,1)
+            # convert cluster assignments to mask per global crop per cluster (0 and 1s), shape [B*num_global_crops, N_c, 14, 14]
             t_assign_map = torch.zeros((b,self.num_clusters, wt, wt),  device=teacher_cls_tokens.device).scatter_(1, t_assign.view(b,wt,wt).long().unsqueeze(1), 1)
+            # use grid_sample and t_grid (shape [4, 12, 12, 2]) to interpolate the mask to the global crop size [B*num_global_crops, N_c, 14, 14]
             t_assign_map = nn.functional.grid_sample(t_assign_map, t_grid, align_corners=True)
+            # convert all values above 0.25 to 1, else 0, still shape [B*num_global_crops, N_c, 12, 12]
+            # I think this means: if the patch is more than 25% covered by the cluster, it is part of the cluster
             t_assign_map = (t_assign_map > .25).to(t_assign_map) 
+            # per cluster per global crop, check if the cluster is present in the global crop
             t_mask = t_assign_map.view(b,self.num_clusters,-1).sum(-1) >= .999
             
-            
+            # [B, N_c, 768] -> [B*N_c, 768]
             teacher_cls_tokens = teacher_cls_tokens.flatten(0,1)
             n_clusters = teacher_cls_tokens.size(0)
+            # global crops are [B*num_global_crops, ebins, 192, 192]
             x = self.teacher.backbone(global_crops, is_training=True)
+            # x[KEY] is [B*num_global_crops, N_p, 768], N_p is number of patches (=12*12=144), each patch is 16x16 pixels
             assert n_clusters//x[KEY].size(0) == self.num_clusters // n_global_crops
+            # IMPROV?: just get x[KEY] once and then do all operations below
             
+            # flattened output from cluster head [B*N_c, 768] is combined with the output from the dino head [B*num_global_crops, 768]
             teacher_cls_tokens = torch.cat((teacher_cls_tokens, self.teacher.dino_head.att(x[KEY])))
+
+            # for the patch loss, we take the embeddings for every patch in the global crops
             ibot_teacher_patch_tokens = x["x_norm_patchtokens"]
             
-            _dim = ibot_teacher_patch_tokens.shape[-1]
+            _dim = ibot_teacher_patch_tokens.shape[-1] # embedding dimension
 
             if do_ibot:
+                # TODO: why create buffer tensor of size upperbound and slice it to size n_masked_patches 
                 buffer_tensor_teacher = ibot_teacher_patch_tokens.new_zeros(upperbound, _dim)
+                # select only the embeddings of the masked patches, saved to buffer_tensor_teacher [n_masked_patches, 768]
                 torch.index_select(
                     ibot_teacher_patch_tokens.flatten(0, 1),
                     dim=0,
                     index=mask_indices_list,
                     out=buffer_tensor_teacher[:n_masked_patches],
                 )
+                # pass the attention pooled context embeddings through the cluster head (now the MLP part)
                 teacher_cls_tokens_after_head_1 = self.teacher.cluster_head(teacher_cls_tokens[:n_clusters])
+                # -> [B*N_c, 32768], 32768 is the output dimension of the cluster head
+                # pass the attention pooled global crop embeddings through the dino head (now the MLP part)
                 teacher_cls_tokens_after_head_2 = self.teacher.dino_head(teacher_cls_tokens[n_clusters:])
+                # -> [B*num_global_crops, 32768], 32768 is the output dimension of the dino head
                 if self.ibot_separate_head:
+                    # pass the masked patch embeddings through the ibot head
                     masked_teacher_patch_tokens_after_head = self.teacher.ibot_head(buffer_tensor_teacher)[
                         :n_masked_patches
                     ]
+                    # -> [n_masked_patches, 32768]
                 else:
+                    # otherwise pass the masked patch embeddings through the dino head
                     masked_teacher_patch_tokens_after_head = self.teacher.dino_head(buffer_tensor_teacher)[
                         :n_masked_patches
                     ]
+                    # -> [n_masked_patches, 32768]
             else:
                 raise NotImplementedError
 
             if self.cfg.train.centering == "centering":
                 raise NotImplementedError
                 
+            # TODO: investigate this sinkhorn_knopp stuff
             elif self.cfg.train.centering == "sinkhorn_knopp":
                 teacher_dino_softmaxed_centered_c = self.dino_loss.sinkhorn_knopp_teacher(
                     teacher_cls_tokens_after_head_1, teacher_temp=teacher_temp
                 )
+                # -> [B*N_c, 32768]
                 
                 teacher_dino_softmaxed_centered_g = self.dino_loss.sinkhorn_knopp_teacher(
                     teacher_cls_tokens_after_head_2, teacher_temp=teacher_temp
                 )
-                
+                # -> [B*num_global_crops, 32768]
+
                 if do_ibot:
                     masked_teacher_ibot_softmaxed_centered = self.ibot_patch_loss.sinkhorn_knopp_teacher(
                         masked_teacher_patch_tokens_after_head,
                         teacher_temp=teacher_temp,
                         n_masked_patches_tensor=n_masked_patches_tensor,
                     )
+                    # -> [n_masked_patches, 32768]
 
             else:
                 raise NotImplementedError
@@ -446,17 +554,23 @@ class PretrainModel(BaseModel):
             return (teacher_dino_softmaxed_centered_c,teacher_dino_softmaxed_centered_g), masked_teacher_ibot_softmaxed_centered
 
         teacher_dino_softmaxed_centered, masked_teacher_ibot_softmaxed_centered = get_teacher_output()
+        # this simply combines the two outputs from the dino heads from the teacher network
         teacher_dino_softmaxed_centered = teacher_dino_softmaxed_centered[0].chunk(self.num_clusters) + teacher_dino_softmaxed_centered[1].chunk(n_global_crops)
-        
+        # -> [num_clusters + n_global_crops, B, 32768]
+
+        # TEACHER is done, now STUDENT
         loss_dict = {}
 
         loss_accumulator = 0 
+        # global crops = [B*num_global_crops, ebins, 192, 192]; masks = [B*num_global_crops, 144]; local crops = [B*num_local_crops, ebins, 96, 96]
         student_global_backbone_output_dict, student_local_backbone_output_dict = self.student.backbone(
             [global_crops, local_crops], masks=[masks, None], is_training=True
         )
 
         student_local_cls_tokens = student_local_backbone_output_dict[KEY]
+        # -> [B*num_local_crops, N_p, 768], N_p is number of patches (=6*6=36), each patch is 16x16 pixels
         student_global_cls_tokens = student_global_backbone_output_dict[KEY]
+        # -> [B*num_global_crops, 144, 768]
         
         if do_ibot:
             _dim = student_global_backbone_output_dict["x_norm_patchtokens"].shape[-1]
@@ -471,15 +585,19 @@ class PretrainModel(BaseModel):
                 student_global_masked_patch_tokens_after_head = self.student.ibot_head(buffer_tensor_patch_tokens)[
                     :n_masked_patches
                 ]
+                # -> [n_masked_patches, 32768]
 
+        # get the global crop embeddings after the dino head from the teacher network
         teacher_global_base = torch.cat((teacher_dino_softmaxed_centered[self.num_clusters:][::-1]))
+        # -> [B*num_global_crops, 32768]
         
         if n_local_crops > 0:
-            
+            # loss weight, probably to account for the way the loss term is calculated
             w = 1 / (n_global_crops_loss_terms + n_local_crops_loss_terms)
 
             student_local_base = self.student.dino_head(student_local_cls_tokens,pool=True)
-              
+            
+            # LOSS: this is the local/global loss (not mentioned in paper)
             dino_local_crops_loss = self.dino_loss(
                 student_output_list=student_local_base.chunk(n_local_crops),
                 teacher_out_softmaxed_centered_list=teacher_global_base.chunk(n_global_crops), 
@@ -497,12 +615,18 @@ class PretrainModel(BaseModel):
            
             student_global_base = self.student.dino_head(student_global_cls_tokens,pool=True)
             
+            # get context embeddings after the dino head from the teacher network (repeat n_global_crops times) and only keep them if the cluster is 
+            # actually present in the global crop
             teacher_center = torch.cat((teacher_dino_softmaxed_centered[:self.num_clusters])).repeat(n_global_crops,1)[t_mask.flatten(0,1)]
+            # -> [B*num_global_crops*N_c, 32768]
+            # convert to bool (originally in 0s and 1s)
             attmask = (t_assign_map.flatten(2) > 0.5).bool()
+            # -> [B*num_global_crops, N_c, 144]
         
             student_global_cls_tokens_after_head = self.student.cluster_head.att(student_global_cls_tokens,self.num_clusters,mask=attmask)[t_mask]
             student_global_cls_tokens_after_head = self.student.cluster_head(student_global_cls_tokens_after_head)
             
+            # LOSS: this is both the context loss and the image loss
             dino_global_crops_loss = self.dino_loss(
                     student_output_list=[student_global_cls_tokens_after_head],
                     teacher_out_softmaxed_centered_list=[
@@ -534,6 +658,7 @@ class PretrainModel(BaseModel):
                 * ibot_loss_scale
             )
 
+            # division by 2 -> counters multiplication of loss_scales, which is equal to 2
             loss_dict["ibot_loss"] = ibot_patch_loss / 2
             loss_accumulator += self.ibot_loss_weight * ibot_patch_loss
         else:
@@ -553,5 +678,3 @@ class PretrainModel(BaseModel):
     def prepare_for_distributed_training(self):
         for k, v in self.student.items():
             self.teacher[k].load_state_dict(self.student[k].state_dict())
-
-
