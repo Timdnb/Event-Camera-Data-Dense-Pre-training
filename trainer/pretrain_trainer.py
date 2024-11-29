@@ -17,7 +17,7 @@ class TrainerPretrain(BaseTrainer):
         self.log = log
         self.opt = opt
         self.checkpoint = checkpoint
-        self.automatic_optimization = False
+        self.automatic_optimization = False # -> activates manual optimization
         self.start_time  = None
         self.past_epoch = 0 
         self.acce = acce
@@ -62,7 +62,7 @@ class TrainerPretrain(BaseTrainer):
         loss, loss_dict = self.model(event,m,temp)
         self.manual_backward(loss)
                 
-
+        # if delay_epoch is set, the last layer is not updated until delay_epoch is reached
         if delay_epoch is not None and delay_epoch > self.get_current_epoch:
             for n, p in self.model.named_parameters():
                 if "last_layer" in n:
@@ -185,6 +185,4 @@ class TrainerPretrain(BaseTrainer):
             self.past_epoch = checkpoint["current_epoch"]
             del checkpoint
         torch.cuda.empty_cache()
-        return optimizer                     
-       
-        
+        return optimizer
