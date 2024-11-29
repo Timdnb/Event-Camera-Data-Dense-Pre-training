@@ -27,6 +27,10 @@ def create_model(opt,logger_name, disable_print=False):
     model_type = opt.pop('type')
 
     # dynamic instantiation
+    # checks if one of the modules contains the model class
+    # - PretrainModel if pretraining
+    # - SwinPAD if finetuning
+    # and 'assigns' it to model_cls
     for module in _model_modules:
         model_cls = getattr(module, model_type, None)
         if model_cls is not None:
@@ -34,6 +38,7 @@ def create_model(opt,logger_name, disable_print=False):
     if model_cls is None:
         raise ValueError(f'Model {model_type} is not found.')
 
+    # instantiate the model
     model = model_cls(**opt)
 
     #logger = get_root_logger(logger_name)
