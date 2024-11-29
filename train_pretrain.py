@@ -19,6 +19,8 @@ import os
 #Speed up training
 cudnn.benchmark = True
 
+# class to convert dict to object
+# https://stackoverflow.com/questions/4984647/accessing-dict-keys-like-an-attribute
 class AttrDict(dict):
     def __init__(self, *args, **kwargs):
         super(AttrDict, self).__init__(*args, **kwargs)
@@ -58,26 +60,49 @@ class data_prep(pl.LightningDataModule):
 
     
 def main(args):
-
+    # take in arguments, update and retrieve options (i.e. the .yaml file)
     args, opt = update_opt(args.opt,args)
     if "torch_home" in opt:
         os.environ['TORCH_HOME'] = opt["torch_home"]
     
+    # initialize loggers
     init_loggers(opt)
     msg_logger = MessageLogger(opt)
 
+    # create model and trainer
     model = create_model(opt["network"],opt['logger']['name']) 
     model = create_trainer(opt['train']['type'], opt['logger']['name'], {"model": model, "log" : msg_logger, "opt" : opt["train"], "checkpoint": args.checkpoint, "acce": args.acce})
     
+    # apex -> is a nvidia library for mixed precision training (AMP = Automatic Mixed Precision)
     if opt.get("apex",False):
         kwargs = {"amp_backend":"apex", "amp_level":"O1"}
     else:
         kwargs = {}
+
+    # syncing batchnorm layers across multiple GPUs
     sync_batchnorm = opt['train'].get('sync_batchnorm', False)
     check_val_every_n_epoch = opt['train'].get('check_val_every_n_epoch',1)
     if args.debug:
         kwargs.update({"limit_train_batches":5})
-    plt = pl.Trainer(max_epochs = opt["train"].get("early_stop_epoch", opt["train"]["epoch"]) - model.past_epoch, num_nodes=args.num_nodes, precision = opt.get("precision",32), gpus=args.gpus,strategy=DDPStrategy(find_unused_parameters=False),checkpoint_callback = False, logger = False, profiler = SimpleProfiler(), sync_batchnorm = sync_batchnorm, replace_sampler_ddp = False, check_val_every_n_epoch = check_val_every_n_epoch, **kwargs)
+
+    # create trainer with pytorch_lightning
+    plt = pl.Trainer(max_epochs = opt["train"].get("early_stop_epoch", opt["train"]["epoch"]) - model.past_epoch, 
+                     num_nodes=args.num_nodes, 
+                     precision = opt.get("precision",32), 
+                     gpus=args.gpus,
+                     strategy=DDPStrategy(find_unused_parameters=False),
+                     checkpoint_callback = False,
+                     logger = False, 
+                     profiler = SimpleProfiler(), 
+                     sync_batchnorm = sync_batchnorm, 
+                     replace_sampler_ddp = False, 
+                     check_val_every_n_epoch = check_val_every_n_epoch, 
+                     **kwargs)
+
+    # fit the model
+    # opt is used to create data_prep object, this has
+    # - setup function to retrieve dataset
+    # - train_dataloader function to create dataloader
     plt.fit(model,data_prep(opt))
     
 
@@ -90,7 +115,7 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint", default = None, type = str)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--debug", action="store_true")
-    parser.add_argument('--opt', type=str, default = "", help='Path to option YAML file.')
+    parser.add_argument('--opt', type=str, default = "./config/pretrain/swin_small.yml", help='Path to option YAML file.')
     
     args = parser.parse_args()
     main(args)
