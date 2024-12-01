@@ -5,7 +5,8 @@ import torch.utils.checkpoint as checkpoint
 import numpy as np
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 from functools import partial
-    
+
+# exactly the same as original SWIN
 class Mlp(nn.Module):
     """ Multilayer perceptron."""
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
@@ -25,7 +26,7 @@ class Mlp(nn.Module):
         x = self.drop(x)
         return x
 
-
+# exactly the same as original SWIN
 def window_partition(x, window_size):
     """
     Args:
@@ -40,7 +41,7 @@ def window_partition(x, window_size):
     windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size, window_size, C)
     return windows
 
-
+# exactly the same as original SWIN
 def window_reverse(windows, window_size, H, W):
     """
     Args:
@@ -57,7 +58,7 @@ def window_reverse(windows, window_size, H, W):
     x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
     return x
 
-
+# exactly the same as original SWIN
 class WindowAttention(nn.Module):
     """ Window based multi-head self attention (W-MSA) module with relative position bias.
     It supports both of shifted and non-shifted window.
@@ -113,7 +114,6 @@ class WindowAttention(nn.Module):
             x: input features with shape of (num_windows*B, N, C)
             mask: (0/-inf) mask with shape of (num_windows, Wh*Ww, Wh*Ww) or None
         """
-        # Same as original implementation
         B_, N, C = x.shape
         qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2] 
@@ -141,7 +141,7 @@ class WindowAttention(nn.Module):
         x = self.proj_drop(x)
         return x
 
-
+# not exactly the same as original SWIN, see ###
 class SwinTransformerBlock(nn.Module):
     """ Swin Transformer Block.
 
@@ -182,6 +182,8 @@ class SwinTransformerBlock(nn.Module):
         self.H = None
         self.W = None
 
+        ### in original SWIN implementation, the creation of attn_mask is here
+
     def forward(self, x, mask_matrix):
         """ Forward function.
         Args:
@@ -197,6 +199,7 @@ class SwinTransformerBlock(nn.Module):
         x = self.norm1(x)
         x = x.view(B, H, W, C)
 
+        ### padding is not done in original SWIN implementation
         # pad feature maps to multiples of window size
         # padding only to the right and bottom
         pad_l = pad_t = 0
@@ -230,6 +233,7 @@ class SwinTransformerBlock(nn.Module):
         else:
             x = shifted_x
 
+        ### padding is not done in original SWIN implementation
         if pad_r > 0 or pad_b > 0:
             x = x[:, :H, :W, :].contiguous()
 
@@ -241,7 +245,7 @@ class SwinTransformerBlock(nn.Module):
 
         return x
 
-
+# not exactly the same as original SWIN, see ###
 class PatchMerging(nn.Module):
     """ Patch Merging Layer
 
@@ -267,6 +271,7 @@ class PatchMerging(nn.Module):
 
         x = x.view(B, H, W, C)
 
+        ### padding is not done in original SWIN implementation
         # padding
         pad_input = (H % 2 == 1) or (W % 2 == 1)
         if pad_input:
@@ -283,7 +288,7 @@ class PatchMerging(nn.Module):
         x = self.reduction(x)
         return x
 
-
+# not exactly the same as original SWIN, see ###
 class BasicLayer(nn.Module):
     """ A basic Swin Transformer layer for one stage.
     Args:
@@ -338,6 +343,8 @@ class BasicLayer(nn.Module):
             x: Input feature, tensor size (B, H*W, C).
             H, W: Spatial resolution of the input feature.
         """
+        ### attn_mask creation is done in the __init__ of SwinTransformerBlock in the original SWIN implementation
+        ### this has the exact same effect as the original implementation (I think)
         # calculate attention mask for SW-MSA
         Hp = int(np.ceil(H / self.window_size)) * self.window_size
         Wp = int(np.ceil(W / self.window_size)) * self.window_size
@@ -376,7 +383,7 @@ class BasicLayer(nn.Module):
         else:
             return x, H, W, x, H, W
 
-
+# not exactly the same as original SWIN, see ###
 class PatchEmbed(nn.Module):
     """ Image to Patch Embedding
 
@@ -402,6 +409,7 @@ class PatchEmbed(nn.Module):
 
     def forward(self, x):
         """Forward function."""
+        ### padding is not done in original SWIN implementation
         # padding
         _, _, H, W = x.size()
         if W % self.patch_size[1] != 0:
@@ -414,11 +422,12 @@ class PatchEmbed(nn.Module):
             Wh, Ww = x.size(2), x.size(3)
             x = x.flatten(2).transpose(1, 2)
             x = self.norm(x)
+            ### line below is not in original SWIN implementation
             x = x.transpose(1, 2).view(-1, self.embed_dim, Wh, Ww)
 
         return x
 
-
+# not exactly the same as original SWIN, see ###
 class SWIN(nn.Module):
     def __init__(self, img_size=224, patch_size=4, in_chans=3, embed_dim=96, depths=[2, 2, 6, 2],
                  num_heads=[3, 6, 12, 24], window_size=7, mlp_ratio=4., qkv_bias=True, qk_scale=None, drop_rate=0.,
@@ -431,6 +440,7 @@ class SWIN(nn.Module):
         self.embed_dim = embed_dim
         self.ape = ape
         self.patch_norm = patch_norm
+        ### out_indices are used to determine which layers to return for representation output
         self.out_indices = out_indices
 
         self.patch_size=patch_size
@@ -473,6 +483,7 @@ class SWIN(nn.Module):
         num_features = [int(embed_dim * 2 ** i) for i in range(self.num_layers)]
         self.num_features = num_features
 
+        ### everything below is not in the original SWIN implementation (in the __init__)
         # add a norm layer for each output
         for i_layer in out_indices:
             layer = norm_layer(num_features[i_layer])
@@ -511,11 +522,13 @@ class SWIN(nn.Module):
             elif isinstance(m, nn.LayerNorm):
                 nn.init.constant_(m.bias, 0)
                 nn.init.constant_(m.weight, 1.0)
+            ### the following is not in the original SWIN implementation
             elif isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
                 trunc_normal_(m.weight, std=.02)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
 
+    ### the forward functions are updated in order to be able to receive a list of inputs
     def forward(self, *args, is_training=False, **kwargs):
         ret = self.forward_features_list(*args, **kwargs)
         if is_training:
@@ -548,6 +561,7 @@ class SWIN(nn.Module):
         else:
             absolute_pos_embed = 0
         
+        ### this is not in the original SWIN implementation (obviously since tokens aren't masked in originall SWIN)
         if masks is not None:
             masks = masks.view(-1,self.mask_dim,self.mask_dim).repeat_interleave(self.patch_size, -1).repeat_interleave(self.patch_size, -2).flatten(1)
             # Set values of masked tokens to 0
@@ -563,6 +577,7 @@ class SWIN(nn.Module):
             layer = self.layers[i]
             x_out, H, W, x, Wh, Ww = layer(x, Wh, Ww)
 
+            ### this is different from the original SWIN implementation
             if i in self.out_indices:
                 outs_prenorm.append(x_out)
                 norm_layer = getattr(self, f'norm{i}')
