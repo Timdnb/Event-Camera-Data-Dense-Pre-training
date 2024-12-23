@@ -3,7 +3,7 @@ precision: 16
 exp_path: experiments/seg/swin_small
         
 datasets:
-    dataset_path: ../datasets/DSEC ##### set the data path
+    dataset_path: /data/tim/datasets/DSEC # path to the dataset
     nr_events_data: 10
     fixed_duration: false
     delta_t_per_data: null
@@ -44,7 +44,7 @@ network:
     ape: false
     patch_norm: true
     use_checkpoint: false
-    pretrained_checkpoint: checkpoint/pr.pt #####set the checkpoint path
+    pretrained_checkpoint: /data/tim/ecddp/Event-Camera-Data-Dense-Pre-training/checkpoint/pr.pt
     keep_patch_keys: false
 
     
