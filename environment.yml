@@ -159,7 +159,6 @@ dependencies:
       - pygments==2.18.0
       - pyparsing==3.2.0
       - python-dateutil==2.9.0.post0
-      - pytorch-lightning==1.6.4
       - qudida==0.0.4
       - regex==2024.11.6
       - rich==13.9.4
@@ -175,7 +174,6 @@ dependencies:
       - tifffile==2024.9.20
       - timm==0.9.16
       - tomli==2.1.0
-      - torch-scatter==2.1.2+pt22cu118
       - torchmetrics==1.5.1
       - tqdm==4.66.6
       - ttach==0.0.3
