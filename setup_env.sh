@@ -44,7 +44,7 @@ pip install mmsegmentation==1.2.2
 # Step 9: Update conda environment with additional dependencies
 if [ -f "environment.yml" ]; then
   echo "Updating conda environment from environment.yml..."
-  conda env update --name ecddp_test --file environment.yml
+  conda env update --name ecddp --file environment.yml
 else
   echo "environment.yml not found. Skipping..."
 fi
