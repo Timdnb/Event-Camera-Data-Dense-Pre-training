@@ -90,12 +90,12 @@ def main(args):
                      num_nodes=args.num_nodes, 
                      precision = opt.get("precision",32), 
                      gpus=args.gpus,
-                     strategy=DDPStrategy(find_unused_parameters=False),
+                    #  strategy=DDPStrategy(find_unused_parameters=False),
                      checkpoint_callback = False,
                      logger = False, 
-                     profiler = SimpleProfiler(), 
-                     sync_batchnorm = sync_batchnorm, 
-                     replace_sampler_ddp = False, 
+                    #  profiler = SimpleProfiler(), 
+                    #  sync_batchnorm = sync_batchnorm, 
+                    #  replace_sampler_ddp = False, 
                      check_val_every_n_epoch = check_val_every_n_epoch, 
                      **kwargs)
 
@@ -115,7 +115,7 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint", default = None, type = str)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--debug", action="store_true")
-    parser.add_argument('--opt', type=str, default = "./config/pretrain/swin_small.yml", help='Path to option YAML file.')
+    parser.add_argument('--opt', type=str, default = "/data/tim/ecddp/Event-Camera-Data-Dense-Pre-training/config/pretrain/swin_small_nvme.yml", help='Path to option YAML file.')
     
     args = parser.parse_args()
     main(args)

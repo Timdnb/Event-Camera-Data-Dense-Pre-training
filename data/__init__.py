@@ -51,7 +51,7 @@ def create_dataset(dataset_opt,logger_name,disable_print=False):
 def create_dataloader(dataset,
                       dataset_opt,
                       logger_name,
-                      ddp_sampler = True,
+                      ddp_sampler = False, ####### SET TO FALSE !!!
                       disable_print= False,
                       ):
     if ddp_sampler:
