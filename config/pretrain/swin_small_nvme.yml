@@ -11,7 +11,7 @@ datasets:
     no_event_polarity: true
     num_workers: 4
     batch_size: 64  
-    crop_size: 224 # set to 224 and removed RandomCrop in model.aug, original was 320
+    crop_size: 320 # set to 224 and removed RandomCrop in model.aug, original was 320
         
 network:
     type: PretrainModel
