@@ -23,6 +23,7 @@ class TartanairPretrainDataset(dataset.Dataset):
         super().__init__()
         self.args = args
         self.event_bins = args.event_bins
+        self.precomputed = args.precomputed
         self.event_polarity = False if args.no_event_polarity else True
         self.train = train
         
@@ -39,6 +40,13 @@ class TartanairPretrainDataset(dataset.Dataset):
 
     def load_data_by_index(self, index):
         event_filename = self.data[index][1]
+
+        if self.precomputed:
+            event_filename = event_filename.replace("event_left", "voxels_{}".format(self.event_bins))
+            event_filename = event_filename.replace(".hdf5", ".pt")
+
+            return torch.load(event_filename)
+        
         if event_filename.endswith(".npy"):
             return np.load(event_filename)
         else:
@@ -57,24 +65,27 @@ class TartanairPretrainDataset(dataset.Dataset):
             y0 = (480 - crop_size[0])//2
             x0 = (640 - crop_size[1])//2
 
-        if len(event.shape)==2:
-            valid_events = (event[:, 0] >= x0) & (event[:, 0] <= x0 + crop_size[1] - 1) &\
-                         (event[:, 1] >= y0) & (event[:, 1] <= y0 + crop_size[0] - 1)
-    
-            event = event[valid_events]
-            event[:,0] = event[:,0] - x0
-            event[:,1] = event[:,1] - y0
-            
-            if event.shape[0] < 10:
-                c = 1 + int(self.event_polarity)
-                event  = np.zeros((self.event_bins*c,height,width))
+        if not self.precomputed:
+            if len(event.shape)==2:
+                valid_events = (event[:, 0] >= x0) & (event[:, 0] <= x0 + crop_size[1] - 1) &\
+                            (event[:, 1] >= y0) & (event[:, 1] <= y0 + crop_size[0] - 1)
+        
+                event = event[valid_events]
+                event[:,0] = event[:,0] - x0
+                event[:,1] = event[:,1] - y0
+                
+                if event.shape[0] < 10:
+                    c = 1 + int(self.event_polarity)
+                    event  = np.zeros((self.event_bins*c,height,width))
+                else:
+                    event = eventsToVoxel(event, num_bins=self.event_bins, height=height,
+                                                    width=width, event_polarity=self.event_polarity, temporal_bilinear=True)
             else:
-                event = eventsToVoxel(event, num_bins=self.event_bins, height=height,
-                                                width=width, event_polarity=self.event_polarity, temporal_bilinear=True)
+                event = event[...,y0:y0+crop_size[0], x0:x0+crop_size[1]]
+                
+            event = torch.from_numpy(event)
         else:
-            event = event[...,y0:y0+crop_size[0], x0:x0+crop_size[1]]
-               
-        event = torch.from_numpy(event)
+            event = event[:, y0:y0+crop_size[0], x0:x0+crop_size[1]]
         return event
 
     def __getitem__(self, index):
