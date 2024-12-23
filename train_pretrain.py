@@ -48,7 +48,7 @@ class data_prep(pl.LightningDataModule):
         crop_size = dataset_opt.get("crop_size",224) 
         aug_params = {'crop_size': [crop_size,crop_size]}
         
-        self.train_dataset = self.DATASETS[dataset_opt["type"]](dataset_opt,True,aug_params) 
+        self.train_dataset = self.DATASETS[dataset_opt["type"]](dataset_opt,opt,True,aug_params) 
         
     def train_dataloader(self):
         if hasattr(self, "train_loader"):
