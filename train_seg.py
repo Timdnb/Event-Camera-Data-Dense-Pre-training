@@ -98,7 +98,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_nodes", default = 1, type = int)
     parser.add_argument("--checkpoint", default = None, type = str)
     parser.add_argument("--resume", action="store_true")
-    parser.add_argument('--opt', type=str, default = "", help='Path to option YAML file.')
+    parser.add_argument('--opt', type=str, default = "/data/tim/ecddp/Event-Camera-Data-Dense-Pre-training/config/seg/swin_small.yml", help='Path to option YAML file.')
     
     args = parser.parse_args()
     main(args)
