@@ -235,6 +235,7 @@ class Sequence(Dataset):
         
         label_path = Path(self.label_pathstrings[index * 2])
         if self.resize:
+            # resize to [448, 640]
             segmentation_mask = cv2.imread(str(label_path), 0)
             segmentation_mask = cv2.resize(segmentation_mask, (self.shape_resize[1], self.shape_resize[0]),
                                            interpolation=cv2.INTER_NEAREST)
