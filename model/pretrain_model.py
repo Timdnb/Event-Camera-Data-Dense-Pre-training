@@ -1,181 +1,12 @@
 import torch
 import torch.nn as nn
-import numpy as np
-import kornia.augmentation as korniatfm
 from .network.swin_pretrain import SWIN
 from .network.layers import DINOHead
 from .network.loss import DINOLoss, iBOTPatchLoss
-import math
 from omegaconf import OmegaConf
 from functools import partial
-import random
 from torch_scatter import scatter_mean
 from copy import deepcopy
-
-class Transform(nn.Module):
-    def __init__(self, cfg, downsample=32):
-        
-        super().__init__()
-       
-        global_crops_scale = cfg.get("global_crops_scale", [0.32,1.0])
-        local_crops_scale = cfg.get("local_crops_scale", [0.05,0.32])
-        global_crops_size = cfg.get("global_crops_size", 192)
-        local_crops_size = cfg.get("local_crops_size", 96) 
-        input_size = cfg.get("input_size", 224)
-        same_on_batch = False
-        
-        self.input = korniatfm.RandomCrop((input_size,input_size))
-        
-        # align_corners=True is important for the grid_sample function
-        teacher1 = [korniatfm.RandomResizedCrop((global_crops_size, global_crops_size), scale=global_crops_scale, same_on_batch=same_on_batch,cropping_mode="slice",align_corners=True)] 
-        teacher1 += [korniatfm.RandomHorizontalFlip(p=0.5,same_on_batch=same_on_batch)]
-        
-        teacher2 = [korniatfm.RandomResizedCrop((global_crops_size, global_crops_size), scale=global_crops_scale, same_on_batch=same_on_batch,cropping_mode="slice",align_corners=True)] 
-        teacher2 += [korniatfm.RandomHorizontalFlip(p=0.5,same_on_batch=same_on_batch)]
-        
-        
-        student = [korniatfm.RandomResizedCrop((local_crops_size, local_crops_size), scale=local_crops_scale, same_on_batch=same_on_batch,cropping_mode="slice", align_corners=True)] 
-        student += [korniatfm.RandomHorizontalFlip(p=0.5,same_on_batch=same_on_batch)]
-    
-        self.student = student
-        self.teacher1 = teacher1
-        self.teacher2 = teacher2
-        self.local_crops_size = local_crops_size
-        self.global_crops_size = global_crops_size
-        self.input_size = input_size
-        grid_h, grid_w = np.meshgrid(range(input_size),range(input_size), indexing='ij')
-        grid = torch.from_numpy(np.stack([grid_w, grid_h])).float().unsqueeze(0)
-        # register_buffers makes sure grid is stored in the state_dict, but not updated by optimizers
-        # +1 ensures that indexing starts from 1, e.g. top left is (1, 1)
-        self.register_buffer("grid",grid + 1)
-        self.downsample = downsample
-        
-    @torch.no_grad()
-    def forward(self, img):
-        
-        img = self.input(img)
-        
-        assert self.input_size == img.size(2) and self.input_size == img.size(3), f"{img.size()}"
-        
-        # b = batch
-        b = img.size(0)
-        # the 2 below defines the number of global crops
-        teacher = img.repeat(2,1,1,1) 
-        # -> [B*n_global_crops, ebins, 224, 224]
-        t_grid = self.grid.expand(b * 2,-1,-1,-1)
-        # -> [B*n_global_crops, 2, 224, 224], the 2 is for the grid_w and grid_h
-
-        # fill with [top_left, bottom_right] coordinates
-        global_crop_pos = []
-        
-        for i, f in enumerate(self.teacher1):
-            teacher = f(teacher)
-            # use f._params to ensurer that the same augmentation is applied to the grid
-            t_grid = f(t_grid,params=f._params)
-
-            if i == 0:
-                global_crop_pos.append([t_grid[:,0,0,0].clone().detach().cpu().numpy(), t_grid[:,1,0,0].clone().detach().cpu().numpy()])
-                global_crop_pos.append([t_grid[:,0,-1,-1].clone().detach().cpu().numpy(), t_grid[:,1,-1,-1].clone().detach().cpu().numpy()])
-
-        # undo index shift  
-        t_grid = t_grid - 1
-        # normalize to [-1, 1]
-        t_grid = 2.0 * t_grid/ max(self.input_size - 1, 1) - 1.0
-        # interpolate to downsample size
-        t_grid = torch.nn.functional.interpolate(t_grid, self.global_crops_size//self.downsample,mode="bilinear", align_corners=True) #torch.nn.functional.adaptive_avg_pool2d(t1_grid, self.global_crops_size//32)
-        # permute to match the format expected by the model
-        # (B, C, H, W) -> (B, H, W, C)
-        t_grid = t_grid.permute(0, 2, 3, 1)
-        
-        
-        student = img.repeat(8,1,1,1)
-        # the 8 below defines the number of local crops
-        s_grid = self.grid.expand(b * 8,-1,-1,-1)
-
-        # fill with [top_left, bottom_right] coordinates
-        local_crop_pos = []
-        
-        student, s_grid, local_crop_pos = self.forward_imp(student, s_grid, local_crop_pos)
-        output = dict(
-            img = img,
-            global_crops = teacher,
-            local_crops = student,
-            s_grid = s_grid,
-            t_grid = t_grid,
-            )
-        
-        visualize_crops = False
-        if visualize_crops:
-            import rerun as rr
-            import cv2
-            rr.init("assignments")
-            rr.connect_tcp('100.120.120.119:9876')
-
-            img1 = img[0,3].clone().detach().cpu().numpy()
-            img1 = np.stack([img1, img1, img1], axis=-1)
-            img1 = np.where(img1 > 0, 1, 0) * 255
-            img1 = img1.astype(np.uint8)
-            
-            gc_pos = []
-            for i in range(2):
-                top_left = (int(global_crop_pos[0][0][i]), int(global_crop_pos[0][1][i]))
-                bottom_right = (int(global_crop_pos[1][0][i]), int(global_crop_pos[1][1][i]))
-                gc_pos.append([top_left, bottom_right])
-                img1 = cv2.rectangle(img1, top_left, bottom_right, (0, 255, 0), 1)
-
-            lc_pos = []
-            for i in range(8):
-                top_left = (int(local_crop_pos[0][0][i]), int(local_crop_pos[0][1][i]))
-                bottom_right = (int(local_crop_pos[1][0][i]), int(local_crop_pos[1][1][i]))
-                lc_pos.append([top_left, bottom_right])
-                img1 = cv2.rectangle(img1, top_left, bottom_right, (255, 0, 0), 1)
-
-            check_overlap = True
-            if check_overlap:
-                def is_no_overlap(rect1, rect2):
-                    # Check if rect1 and rect2 do not overlap
-                    return (rect1[1][0] <= rect2[0][0] or  # rect1 is to the left of rect2
-                            rect1[0][0] >= rect2[1][0] or  # rect1 is to the right of rect2
-                            rect1[1][1] <= rect2[0][1] or  # rect1 is above rect2
-                            rect1[0][1] >= rect2[1][1])    # rect1 is below rect2
-
-                def check_no_overlap(main_rects, other_rects):
-                    for other in other_rects:
-                        if all(is_no_overlap(other, main) for main in main_rects):
-                            return True  # Found a rectangle with no overlap
-                    return False  # All rectangles overlap with at least one main rectangle
-                
-                result = check_no_overlap(gc_pos, lc_pos)
-                print(f"Overlap between global and local crops: {result}")
-
-                if result:
-                    rr.log("crops", rr.Image(img1))
-                    input("Press Enter to continue...")
-            
-            if not check_overlap:
-                rr.log("crops", rr.Image(img1))
-                input("Press Enter to continue...")
-
-        return collate_data(output)
-    
-    def forward_imp(self, s, g, local_crop_pos):
-        
-        downsample = partial(torch.nn.functional.interpolate, size = self.local_crops_size//self.downsample, mode="bilinear", align_corners=True) #partial(torch.nn.functional.adaptive_avg_pool2d, output_size = self.local_crops_size//32)
-        
-        for i, f in enumerate(self.student):
-            s = f(s)
-            g = f(g,params=f._params)
-
-            if i == 0:
-                local_crop_pos.append([g[:,0,0,0].clone().detach().cpu().numpy(), g[:,1,0,0].clone().detach().cpu().numpy()])
-                local_crop_pos.append([g[:,0,-1,-1].clone().detach().cpu().numpy(), g[:,1,-1,-1].clone().detach().cpu().numpy()])
-            
-        g = g - 1
-        g = 2.0 * g/ max(self.input_size - 1, 1) - 1.0
-        g = downsample(g) 
-        g = g.permute(0, 2, 3, 1)
-
-        return s, g, local_crop_pos
 
 @torch.no_grad()
 def batch_cosine_KMeans(X,num_clusters=6,max_iter=10):
@@ -199,88 +30,9 @@ def batch_cosine_KMeans(X,num_clusters=6,max_iter=10):
         centroids = scatter_mean(X, assignments,dim=1)
     return assignments, centroids
 
-
-class MaskingGenerator:
-    def __init__(
-        self,
-        input_size,
-        num_masking_patches=None,
-        min_num_patches=4,
-        max_num_patches=None,
-        min_aspect=0.3,
-        max_aspect=None,
-    ):
-        if not isinstance(input_size, tuple):
-            input_size = (input_size,) * 2
-        self.height, self.width = input_size
-
-        self.num_patches = self.height * self.width
-        self.num_masking_patches = num_masking_patches
-
-        self.min_num_patches = min_num_patches
-        self.max_num_patches = num_masking_patches if max_num_patches is None else max_num_patches
-
-        max_aspect = max_aspect or 1 / min_aspect
-        self.log_aspect_ratio = (math.log(min_aspect), math.log(max_aspect))
-
-    # a __repr__ function is used to print the object in a human readable format
-    def __repr__(self):
-        repr_str = "Generator(%d, %d -> [%d ~ %d], max = %d, %.3f ~ %.3f)" % (
-            self.height,
-            self.width,
-            self.min_num_patches,
-            self.max_num_patches,
-            self.num_masking_patches,
-            self.log_aspect_ratio[0],
-            self.log_aspect_ratio[1],
-        )
-        return repr_str
-
-    def get_shape(self):
-        return self.height, self.width
-
-    def _mask(self, mask, max_mask_patches):
-        delta = 0
-        for _ in range(10):
-            target_area = random.uniform(self.min_num_patches, max_mask_patches)
-            # no clue why the log is undone here
-            aspect_ratio = math.exp(random.uniform(*self.log_aspect_ratio))
-            h = int(round(math.sqrt(target_area * aspect_ratio)))
-            w = int(round(math.sqrt(target_area / aspect_ratio)))
-            if w < self.width and h < self.height:
-                top = random.randint(0, self.height - h)
-                left = random.randint(0, self.width - w)
-
-                num_masked = mask[top : top + h, left : left + w].sum()
-                # Overlap
-                if 0 < h * w - num_masked <= max_mask_patches:
-                    for i in range(top, top + h):
-                        for j in range(left, left + w):
-                            if mask[i, j] == 0:
-                                mask[i, j] = 1
-                                delta += 1
-
-                if delta > 0:
-                    break
-        return delta
-
-    def __call__(self, num_masking_patches=0):
-        mask = np.zeros(shape=self.get_shape(), dtype=bool)
-        mask_count = 0
-        while mask_count < num_masking_patches:
-            max_mask_patches = num_masking_patches - mask_count
-            max_mask_patches = min(max_mask_patches, self.max_num_patches)
-            delta = self._mask(mask, max_mask_patches)
-            if delta == 0:
-                break
-            else:
-                mask_count += delta
-        return mask
-
 class BaseModel(nn.Module):
-    def __init__(self, cfg=None, n_tokens=8, *args,**kwargs):
+    def __init__(self, cfg=None, n_tokens=8, *args,**kwargs): # WHEN CHANGING n_tokens, ALSO CHANGE IN ETartanAir_dataset.py line 139
         super().__init__()
-        global collate_data
         
         cfg = OmegaConf.create(cfg)
         self.cfg = cfg
@@ -370,100 +122,18 @@ class BaseModel(nn.Module):
             p.requires_grad = False
             
         self.prepare_for_distributed_training()
-        
-        def collate_data(samples, mask_ratio_tuple = cfg.ibot.mask_ratio_min_max, mask_probability=cfg.ibot.mask_sample_probability): 
-    
-            collated_global_crops = samples["global_crops"]
-            collated_local_crops = samples["local_crops"]
-            img = samples["img"]
-            s_grid = samples["s_grid"]
-            t_grid = samples["t_grid"]
-            device = collated_global_crops.device
-
-            # B is 'new' batch size, however not the original batch size, but batch size * num_global_crops
-            B = len(collated_global_crops)
-            # N is not the same as number of patches (that is 12x12, this is 8x8), not sure what it is but probably arbitrary
-            # value to limit the number of patches being masked
-            N = self.n_tokens**2  
-            n_samples_masked = int(B * mask_probability)
-            probs = torch.linspace(*mask_ratio_tuple, n_samples_masked + 1)
-            upperbound = 0
-            masks_list = []
-            for i in range(0, n_samples_masked):
-                prob_min = probs[i]
-                prob_max = probs[i + 1]
-                # single mask is a 12x12 boolean tensor
-                masks_list.append(torch.BoolTensor(mask_generator(int(N * random.uniform(prob_min, prob_max)))))
-                upperbound += int(N * prob_max)
-            for i in range(n_samples_masked, B):
-                masks_list.append(torch.BoolTensor(mask_generator(0)))
-
-            visualize_mask = False
-            if visualize_mask:
-                import rerun as rr
-                rr.init("assignments")
-                rr.connect_tcp('100.120.120.119:9876')
-
-                for mask_n in range(len(masks_list)//2):
-                    mask = masks_list[mask_n].clone().detach().cpu().numpy()
-                    mask_img = np.zeros((12*16, 12*16, 3))
-
-                    for i in range(12):
-                        for j in range(12):
-                            if mask[i, j]:
-                                mask_img[i*16:(i+1)*16, j*16:(j+1)*16] = 1
-                    
-                    rr.log(f"mask-{mask_n}", rr.Image(mask_img))
-                input("Press Enter to continue...")
-
-            # masks_list is B*num_global_crops times [12x12]
-            random.shuffle(masks_list)
-
-            # collated_masks is [B*num_global_crops times, 144]
-            collated_masks = torch.stack(masks_list).flatten(1).to(device)
-            # only keep the indices of the masked patches
-            mask_indices_list = collated_masks.flatten().nonzero().flatten()
-
-            # masks_weight is used to balance the loss when the number of masked patches is different
-            # this ensures that an image with many masked patches does not contribute more to the loss
-            # is this desired behavior?
-            # calculation comes down to: 1 / number of masked patches for the specific mask, then this weight is assigned 
-            # to each patch of that mask
-            masks_weight = (1 / collated_masks.sum(-1).clamp(min=1.0)).unsqueeze(-1).expand_as(collated_masks)[collated_masks]
-        
-            return {
-                "collated_global_crops": collated_global_crops,
-                "collated_local_crops": collated_local_crops,
-                "s_grid": s_grid,
-                "t_grid": t_grid,
-                "img": img,
-                "collated_masks": collated_masks,
-                "mask_indices_list": mask_indices_list,
-                "masks_weight": masks_weight,
-                "upperbound": upperbound,
-                "n_masked_patches": torch.full((1,), fill_value=mask_indices_list.shape[0], dtype=torch.long).to(device),
-            }
                 
 
 class PretrainModel(BaseModel):
-    def __init__(self, num_clusters = 8, aug_downsample=16, *args, **kwargs):
-        global mask_generator
+    def __init__(self, num_clusters = 8, aug_downsample=16, *args, **kwargs): # WHEN CHANING aug_downsample, ALSO CHANGE IN pretrain_model.py line 262
         N = kwargs["cfg"]["crops"]["global_crops_size"] // aug_downsample
         mask_dim = N
-        mask_generator = MaskingGenerator(
-            input_size=(N, N),
-            max_num_patches=0.5 * N * N,
-        )
-        # initialize the parent class
-        # i.e. backbone and 3 heads for both the teacher and student networrk
         super().__init__(mask_dim=mask_dim,*args,**kwargs)
         self.num_clusters = num_clusters
-        self.aug = Transform(kwargs["cfg"]["crops"], aug_downsample)
 
     def forward(self, img, m, teacher_temp):
         self.update_teacher(m)
-        images = self.aug(img)
-        return self.forward_imp(images,teacher_temp)
+        return self.forward_imp(img,teacher_temp)
         
     def forward_imp(self, images, teacher_temp):
         n_global_crops = 2
@@ -512,38 +182,6 @@ class PretrainModel(BaseModel):
             # assign has shape [B, 196]
             assign, _ = batch_cosine_KMeans(teacher_cls_tokens, num_clusters=self.num_clusters)
             # for future reference: if we want to use a variable number of clusters, it can be changed (per batch) on the fly
-            
-            visualize_assignments = False
-            if visualize_assignments:
-                # from this vizualization:
-                # patches are somewhat random and not apart from 0-2 clusters per image, the others are bad
-                # maybe improve this by only keeping the clusterr which cover
-                # 1. many events
-                # 2. minimum consecutive area (so not randomly scattered patches)
-                import rerun as rr
-                rr.init("assignments")
-                rr.connect_tcp('100.120.120.119:9876')
-                
-                ebin = 3
-                im_c = imgs[0][ebin].clone().detach().cpu().numpy()
-                assign_c = assign[0].clone().detach().cpu().numpy()
-
-                # create the colored image
-                colors = [(0,0,0), (255,0,0), (0,255,0), (0,0,255), (255,255,0), (0,255,255), (255,0,255), (255,255,255)]
-                im_color = np.zeros((224,224,3))
-                for i in range(14):
-                    for j in range(14):
-                        cluster = int(assign_c[i*14+j])
-                        # cluster = int(assign_c[i+j*14])
-                        im_color[i*16:i*16+16,j*16:j*16+16] = colors[cluster]
-
-                # overlay the color pattern with the original image (which is grayscale)
-                im_color = im_color/255
-                overlay = 0.5*im_color + 0.5*im_c[:,:,None]
-                overlay *= 255 
-
-                rr.log(f"ebin{ebin}", rr.Image(overlay))
-                input("Press Enter to continue...")
 
             # convert cluster assignments to boolean mask per cluster, i.e. shape [B, N_c, 196]
             attmask = tomask(torch.zeros((b//2,self.num_clusters, wt**2),  device=teacher_cls_tokens.device),assign)
