@@ -51,7 +51,7 @@ def create_dataset(dataset_opt,logger_name,disable_print=False):
 def create_dataloader(dataset,
                       dataset_opt,
                       logger_name,
-                      ddp_sampler = False, ####### SET TO FALSE !!!
+                      ddp_sampler = False, # Set to false for single GPU training
                       disable_print= False,
                       ):
     if ddp_sampler:
@@ -68,7 +68,7 @@ def create_dataloader(dataset,
     
     # pin_memory should be True when dataset is loaded on CPU and then transferred to GPU
     Loader = DataLoader(dataset, 
-        batch_size=dataset_opt["batch_size"], num_workers=dataset_opt["num_workers"], drop_last=drop_last, pin_memory=dataset_opt["pin_memory"], persistent_workers = dataset_opt["persistent_workers"], sampler = sampler)
+        batch_size=dataset_opt["batch_size"], num_workers=dataset_opt["num_workers"], drop_last=drop_last, pin_memory=dataset_opt["pin_memory"], persistent_workers = dataset_opt["persistent_workers"], sampler = sampler, collate_fn=dataset.batch_aug)
     if not disable_print:
         logger = get_root_logger(logger_name)
         logger.info("Data loader is created")
