@@ -10,8 +10,8 @@ datasets:
     precomputed: true # currently only works for event_bins = 6
     no_event_polarity: true
     num_workers: 7
-    batch_size: 2  
-    crop_size: 320
+    batch_size: 64  
+    crop_size: 224 # set to 224 and removed RandomCrop in model.aug, original was 320
         
 network:
     type: PretrainModel
