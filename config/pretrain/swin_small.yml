@@ -4,9 +4,10 @@ exp_path: experiments/pretrain/swin_small
 datasets:
     persistent_workers: true
     pin_memory: true
-    file: generate_data/file_path.txt
+    file: /data/tim/ecddp/Event-Camera-Data-Dense-Pre-training/generate_data/file_path.txt
     type: TartanairPretrainDataset
     event_bins: 6 # can't change this without changing in_chans
+    precomputed: true # currently only works for event_bins = 6
     no_event_polarity: true
     num_workers: 7
     batch_size: 2  
