@@ -61,14 +61,21 @@ class Transform(nn.Module):
         b = img.size(0)
         # the 2 below defines the number of global crops
         teacher = img.repeat(2,1,1,1) 
-        # -> [B*n_global_crops, ebins, 224, 244]
+        # -> [B*n_global_crops, ebins, 224, 224]
         t_grid = self.grid.expand(b * 2,-1,-1,-1)
         # -> [B*n_global_crops, 2, 224, 224], the 2 is for the grid_w and grid_h
+
+        # fill with [top_left, bottom_right] coordinates
+        global_crop_pos = []
         
-        for f in self.teacher1:
+        for i, f in enumerate(self.teacher1):
             teacher = f(teacher)
             # use f._params to ensurer that the same augmentation is applied to the grid
             t_grid = f(t_grid,params=f._params)
+
+            if i == 0:
+                global_crop_pos.append([t_grid[:,0,0,0].clone().detach().cpu().numpy(), t_grid[:,1,0,0].clone().detach().cpu().numpy()])
+                global_crop_pos.append([t_grid[:,0,-1,-1].clone().detach().cpu().numpy(), t_grid[:,1,-1,-1].clone().detach().cpu().numpy()])
 
         # undo index shift  
         t_grid = t_grid - 1
@@ -84,8 +91,11 @@ class Transform(nn.Module):
         student = img.repeat(8,1,1,1)
         # the 8 below defines the number of local crops
         s_grid = self.grid.expand(b * 8,-1,-1,-1)
+
+        # fill with [top_left, bottom_right] coordinates
+        local_crop_pos = []
         
-        student, s_grid = self.forward_imp(student, s_grid)
+        student, s_grid, local_crop_pos = self.forward_imp(student, s_grid, local_crop_pos)
         output = dict(
             img = img,
             global_crops = teacher,
@@ -93,22 +103,79 @@ class Transform(nn.Module):
             s_grid = s_grid,
             t_grid = t_grid,
             )
+        
+        visualize_crops = False
+        if visualize_crops:
+            import rerun as rr
+            import cv2
+            rr.init("assignments")
+            rr.connect_tcp('100.120.120.119:9876')
+
+            img1 = img[0,3].clone().detach().cpu().numpy()
+            img1 = np.stack([img1, img1, img1], axis=-1)
+            img1 = np.where(img1 > 0, 1, 0) * 255
+            img1 = img1.astype(np.uint8)
+            
+            gc_pos = []
+            for i in range(2):
+                top_left = (int(global_crop_pos[0][0][i]), int(global_crop_pos[0][1][i]))
+                bottom_right = (int(global_crop_pos[1][0][i]), int(global_crop_pos[1][1][i]))
+                gc_pos.append([top_left, bottom_right])
+                img1 = cv2.rectangle(img1, top_left, bottom_right, (0, 255, 0), 1)
+
+            lc_pos = []
+            for i in range(8):
+                top_left = (int(local_crop_pos[0][0][i]), int(local_crop_pos[0][1][i]))
+                bottom_right = (int(local_crop_pos[1][0][i]), int(local_crop_pos[1][1][i]))
+                lc_pos.append([top_left, bottom_right])
+                img1 = cv2.rectangle(img1, top_left, bottom_right, (255, 0, 0), 1)
+
+            check_overlap = True
+            if check_overlap:
+                def is_no_overlap(rect1, rect2):
+                    # Check if rect1 and rect2 do not overlap
+                    return (rect1[1][0] <= rect2[0][0] or  # rect1 is to the left of rect2
+                            rect1[0][0] >= rect2[1][0] or  # rect1 is to the right of rect2
+                            rect1[1][1] <= rect2[0][1] or  # rect1 is above rect2
+                            rect1[0][1] >= rect2[1][1])    # rect1 is below rect2
+
+                def check_no_overlap(main_rects, other_rects):
+                    for other in other_rects:
+                        if all(is_no_overlap(other, main) for main in main_rects):
+                            return True  # Found a rectangle with no overlap
+                    return False  # All rectangles overlap with at least one main rectangle
+                
+                result = check_no_overlap(gc_pos, lc_pos)
+                print(f"Overlap between global and local crops: {result}")
+
+                if result:
+                    rr.log("crops", rr.Image(img1))
+                    input("Press Enter to continue...")
+            
+            if not check_overlap:
+                rr.log("crops", rr.Image(img1))
+                input("Press Enter to continue...")
+
         return collate_data(output)
     
-    def forward_imp(self, s, g):
+    def forward_imp(self, s, g, local_crop_pos):
         
         downsample = partial(torch.nn.functional.interpolate, size = self.local_crops_size//self.downsample, mode="bilinear", align_corners=True) #partial(torch.nn.functional.adaptive_avg_pool2d, output_size = self.local_crops_size//32)
         
-        for f in self.student:
+        for i, f in enumerate(self.student):
             s = f(s)
             g = f(g,params=f._params)
+
+            if i == 0:
+                local_crop_pos.append([g[:,0,0,0].clone().detach().cpu().numpy(), g[:,1,0,0].clone().detach().cpu().numpy()])
+                local_crop_pos.append([g[:,0,-1,-1].clone().detach().cpu().numpy(), g[:,1,-1,-1].clone().detach().cpu().numpy()])
             
         g = g - 1
         g = 2.0 * g/ max(self.input_size - 1, 1) - 1.0
         g = downsample(g) 
         g = g.permute(0, 2, 3, 1)
 
-        return s, g
+        return s, g, local_crop_pos
 
 @torch.no_grad()
 def batch_cosine_KMeans(X,num_clusters=6,max_iter=10):
@@ -331,6 +398,24 @@ class BaseModel(nn.Module):
             for i in range(n_samples_masked, B):
                 masks_list.append(torch.BoolTensor(mask_generator(0)))
 
+            visualize_mask = False
+            if visualize_mask:
+                import rerun as rr
+                rr.init("assignments")
+                rr.connect_tcp('100.120.120.119:9876')
+
+                for mask_n in range(len(masks_list)//2):
+                    mask = masks_list[mask_n].clone().detach().cpu().numpy()
+                    mask_img = np.zeros((12*16, 12*16, 3))
+
+                    for i in range(12):
+                        for j in range(12):
+                            if mask[i, j]:
+                                mask_img[i*16:(i+1)*16, j*16:(j+1)*16] = 1
+                    
+                    rr.log(f"mask-{mask_n}", rr.Image(mask_img))
+                input("Press Enter to continue...")
+
             # masks_list is B*num_global_crops times [12x12]
             random.shuffle(masks_list)
 
@@ -428,8 +513,8 @@ class PretrainModel(BaseModel):
             assign, _ = batch_cosine_KMeans(teacher_cls_tokens, num_clusters=self.num_clusters)
             # for future reference: if we want to use a variable number of clusters, it can be changed (per batch) on the fly
             
-            show_assignments = False
-            if show_assignments:
+            visualize_assignments = False
+            if visualize_assignments:
                 # from this vizualization:
                 # patches are somewhat random and not apart from 0-2 clusters per image, the others are bad
                 # maybe improve this by only keeping the clusterr which cover
