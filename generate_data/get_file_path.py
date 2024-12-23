@@ -19,7 +19,7 @@ if __name__ == '__main__':
     parser.add_argument('--dataset_root', type=str, required=True)
     option = parser.parse_args()
     FILESIZE = 100 * 1024
-    with open("file_path.txt", "w") as f:
+    with open("generate_data/file_path.txt", "w") as f:
         c = 0
         for event_second in tqdm.tqdm(sorted(glob.glob(f"{option.dataset_root}/**/event_left/*.hdf5",recursive=True))):
             if event_second.endswith("000000_000001_event.hdf5"):
