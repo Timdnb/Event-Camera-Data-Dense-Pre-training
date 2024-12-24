@@ -31,6 +31,8 @@ if __name__ == "__main__":
 
     for env in os.listdir(dataset_path):
         env_path = os.path.join(dataset_path, env)
+        if os.path.isfile(env_path):
+            continue
         for diff in os.listdir(env_path):
             if diff == "Hard":
                 continue
